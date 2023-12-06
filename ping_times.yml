@@ -1,0 +1,53 @@
+- name: Ping all hosts and save results in a table
+  hosts: all
+  gather_facts: false
+  strategy: linear
+  vars:
+    domain: ""
+    ping_count: 8
+
+  tasks:
+    - name: Initialize results table
+      set_fact:
+        ping_table: {}
+
+    - name: Calculate domain
+      set_fact:
+        calc_domain: "{{ '.' if (domain and not domain.startswith('.')) else '' }}{{ domain }}"
+
+    - name: Ping hosts and record results
+      command: "ping -c {{ ping_count }} -q -n {{ item }}{{ calc_domain }}"
+      register: ping_result
+      with_items: "{{ groups['all'] | shuffle }}"
+      failed_when: false
+      changed_when: true
+
+    - name: Populate results table with average ping time
+      set_fact:
+        ping_table: "{{ ping_table | default({}) | combine({item.item: ping_avg}) }}"
+      with_items: "{{ ping_result.results }}"
+      vars:
+        ping_avg: "{{ (item.stdout_lines[-1] | regex_replace('^rtt min\/avg\/max\/mdev = [0-9.]+\/([0-9.]+)\/[0-9.]+\/[0-9.]+ ms', '\\1'))
+                      if (item.stdout_lines and '0 received' not in item.stdout_lines[-1]) else '' }}"
+
+    - name: Collate ping data
+      set_fact:
+        collated_data: "{{ collated_data | default({}) | combine({item: hostvars[item]['ping_table']}) }}"
+      loop: "{{ ansible_play_hosts }}"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Save CSV output
+      copy:
+        content: |
+          host,{{ hostnames | join(',') }},
+          {% for item in hostnames %}
+          {{ item }},{% for host in hostnames %}{{ collated_data[item][host] }},{% endfor %}
+
+          {% endfor %}
+        dest: "./ping_table.csv"
+        mode: "0664"
+      vars:
+        hostnames: "{{ collated_data | list }}"
+      delegate_to: localhost
+      run_once: true
